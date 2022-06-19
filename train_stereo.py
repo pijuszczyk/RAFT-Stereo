@@ -185,9 +185,16 @@ def train(args):
                 logging.info(f"Saving file {save_path.absolute()}")
                 torch.save(model.state_dict(), save_path)
 
-                results = validate_things(model.module, iters=args.valid_iters)
-
-                logger.write_dict(results)
+                if args.valid_dataset == 'things':
+                    results = validate_things(model.module, iters=args.valid_iters)
+                    logger.write_dict(results)
+                elif args.valid_dataset.startswith('middlebury_'):
+                    split = args.valid_dataset[-1]
+                    assert split in ['F', 'H', 'Q']
+                    results = validate_middlebury(model.module, iters=args.valid_iters, split=split)
+                    logger.write_dict(results)
+                else:
+                    print('Invalid validation dataset. Skipping validation')
 
                 model.train()
                 model.module.freeze_bn()
@@ -228,6 +235,7 @@ if __name__ == '__main__':
 
     # Validation parameters
     parser.add_argument('--valid_iters', type=int, default=32, help='number of flow-field updates during validation forward pass')
+    parser.add_argument('--valid_dataset', type=str, default='things', help='validation dataset')
 
     # Architecure choices
     parser.add_argument('--corr_implementation', choices=["reg", "alt", "reg_cuda", "alt_cuda"], default="reg", help="correlation volume implementation")
