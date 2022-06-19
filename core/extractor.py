@@ -3,6 +3,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def get_norm(norm_fn, out_channels, num_groups):
+    if norm_fn == 'group':
+        return nn.GroupNorm(num_groups=num_groups, num_channels=out_channels)
+    elif norm_fn == 'batch':
+        return nn.BatchNorm2d(out_channels)
+    elif norm_fn == 'instance':
+        return nn.InstanceNorm2d(out_channels)
+    elif norm_fn == 'none':
+        return nn.Sequential()
+    else:
+        raise RuntimeError("Invalid norm")
+
+
 class ResidualBlock(nn.Module):
     def __init__(self, in_planes, planes, norm_fn='group', stride=1):
         super(ResidualBlock, self).__init__()
@@ -13,29 +26,10 @@ class ResidualBlock(nn.Module):
 
         num_groups = planes // 8
 
-        if norm_fn == 'group':
-            self.norm1 = nn.GroupNorm(num_groups=num_groups, num_channels=planes)
-            self.norm2 = nn.GroupNorm(num_groups=num_groups, num_channels=planes)
-            if not (stride == 1 and in_planes == planes):
-                self.norm3 = nn.GroupNorm(num_groups=num_groups, num_channels=planes)
-        
-        elif norm_fn == 'batch':
-            self.norm1 = nn.BatchNorm2d(planes)
-            self.norm2 = nn.BatchNorm2d(planes)
-            if not (stride == 1 and in_planes == planes):
-                self.norm3 = nn.BatchNorm2d(planes)
-        
-        elif norm_fn == 'instance':
-            self.norm1 = nn.InstanceNorm2d(planes)
-            self.norm2 = nn.InstanceNorm2d(planes)
-            if not (stride == 1 and in_planes == planes):
-                self.norm3 = nn.InstanceNorm2d(planes)
-
-        elif norm_fn == 'none':
-            self.norm1 = nn.Sequential()
-            self.norm2 = nn.Sequential()
-            if not (stride == 1 and in_planes == planes):
-                self.norm3 = nn.Sequential()
+        self.norm1 = get_norm(norm_fn, planes, num_groups)
+        self.norm2 = get_norm(norm_fn, planes, num_groups)
+        if not (stride == 1 and in_planes == planes):
+            self.norm3 = get_norm(norm_fn, planes, num_groups)
 
         if stride == 1 and in_planes == planes:
             self.downsample = None
@@ -72,33 +66,11 @@ class BottleneckBlock(nn.Module):
 
         num_groups = planes // 8
 
-        if norm_fn == 'group':
-            self.norm1 = nn.GroupNorm(num_groups=num_groups, num_channels=planes//4)
-            self.norm2 = nn.GroupNorm(num_groups=num_groups, num_channels=planes//4)
-            self.norm3 = nn.GroupNorm(num_groups=num_groups, num_channels=planes)
-            if not stride == 1:
-                self.norm4 = nn.GroupNorm(num_groups=num_groups, num_channels=planes)
-        
-        elif norm_fn == 'batch':
-            self.norm1 = nn.BatchNorm2d(planes//4)
-            self.norm2 = nn.BatchNorm2d(planes//4)
-            self.norm3 = nn.BatchNorm2d(planes)
-            if not stride == 1:
-                self.norm4 = nn.BatchNorm2d(planes)
-        
-        elif norm_fn == 'instance':
-            self.norm1 = nn.InstanceNorm2d(planes//4)
-            self.norm2 = nn.InstanceNorm2d(planes//4)
-            self.norm3 = nn.InstanceNorm2d(planes)
-            if not stride == 1:
-                self.norm4 = nn.InstanceNorm2d(planes)
-
-        elif norm_fn == 'none':
-            self.norm1 = nn.Sequential()
-            self.norm2 = nn.Sequential()
-            self.norm3 = nn.Sequential()
-            if not stride == 1:
-                self.norm4 = nn.Sequential()
+        self.norm1 = get_norm(norm_fn, planes//4, num_groups)
+        self.norm2 = get_norm(norm_fn, planes//4, num_groups)
+        self.norm3 = get_norm(norm_fn, planes, num_groups)
+        if not stride == 1:
+            self.norm4 = get_norm(norm_fn, planes, num_groups)
 
         if stride == 1:
             self.downsample = None
@@ -118,6 +90,7 @@ class BottleneckBlock(nn.Module):
             x = self.downsample(x)
 
         return self.relu(x+y)
+
 
 class BasicEncoder(nn.Module):
     def __init__(self, output_dim=128, norm_fn='batch', dropout=0.0, downsample=3):
