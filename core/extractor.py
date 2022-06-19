@@ -17,7 +17,7 @@ def get_norm(norm_fn, out_channels, num_groups):
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, in_planes, planes, norm_fn='group', stride=1):
+    def __init__(self, in_planes, planes, norm_fn='group', stride=1, expanse_ratio=None):
         super(ResidualBlock, self).__init__()
   
         self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, padding=1, stride=stride)
@@ -53,6 +53,108 @@ class ResidualBlock(nn.Module):
 
         return self.relu(x+y)
 
+
+# Adapted from mobilestereonet/models/submodule.py
+def convbn(in_channels, out_channels, kernel_size, norm_fn, stride):
+
+    return nn.Sequential(
+        nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, bias=False),
+        get_norm(norm_fn, out_channels, 1)
+    )
+
+
+def convbn_dws(inp, oup, kernel_size, norm_fn, stride, second_relu=True):
+    if second_relu:
+        return nn.Sequential(
+            # dw
+            nn.Conv2d(inp, inp, kernel_size=kernel_size, stride=stride, groups=inp, padding=1, bias=False),
+            get_norm(norm_fn, inp, 1),
+            nn.ReLU6(inplace=True),
+            # pw
+            nn.Conv2d(inp, oup, 1, 1, 0, bias=False),
+            get_norm(norm_fn, oup, 1),
+            nn.ReLU6(inplace=False)
+            )
+    else:
+        return nn.Sequential(
+            # dw
+            nn.Conv2d(inp, inp, kernel_size=kernel_size, stride=stride, groups=inp, padding=1, bias=False),
+            get_norm(norm_fn, inp, 1),
+            nn.ReLU6(inplace=True),
+            # pw
+            nn.Conv2d(inp, oup, 1, 1, 0, bias=False),
+            get_norm(norm_fn, oup, 1)
+            )
+
+
+class MobileV1_Residual(nn.Module):
+    expansion = 1
+
+    def __init__(self, inplanes, planes, norm_fn='group', stride=1, expanse_ratio=None):
+        super(MobileV1_Residual, self).__init__()
+
+        self.stride = stride
+        self.conv1 = convbn_dws(inplanes, planes, 3, norm_fn, stride)
+        self.conv2 = convbn_dws(planes, planes, 3, norm_fn, 1, second_relu=False)
+
+        self.downsample = None
+        if stride != 1 or inplanes != planes:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(inplanes, planes, kernel_size=1, stride=stride, bias=False),
+                get_norm(norm_fn, planes, 1)
+            )
+
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.conv2(out)
+
+        if self.downsample is not None:
+            x = self.downsample(x)
+
+        out += x
+
+        return out
+
+
+class MobileV2_Residual(nn.Module):
+    def __init__(self, inp, oup, norm_fn='group', stride=1, expanse_ratio=1):
+        super(MobileV2_Residual, self).__init__()
+        self.stride = stride
+        assert stride in [1, 2]
+
+        hidden_dim = int(inp * expanse_ratio)
+        self.use_res_connect = self.stride == 1 and inp == oup
+
+        if expanse_ratio == 1:
+            self.conv = nn.Sequential(
+                # dw
+                nn.Conv2d(hidden_dim, hidden_dim, 3, stride, 1, groups=hidden_dim, bias=False),
+                get_norm(norm_fn, hidden_dim, 1),
+                nn.ReLU6(inplace=True),
+                # pw-linear
+                nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
+                get_norm(norm_fn, oup, 1),
+            )
+        else:
+            self.conv = nn.Sequential(
+                # pw
+                nn.Conv2d(inp, hidden_dim, 1, 1, 0, bias=False),
+                get_norm(norm_fn, hidden_dim, 1),
+                nn.ReLU6(inplace=True),
+                # dw
+                nn.Conv2d(hidden_dim, hidden_dim, 3, stride, 1, groups=hidden_dim, bias=False),
+                get_norm(norm_fn, hidden_dim, 1),
+                nn.ReLU6(inplace=True),
+                # pw-linear
+                nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
+                get_norm(norm_fn, oup, 1),
+            )
+
+    def forward(self, x):
+        if self.use_res_connect:
+            return x + self.conv(x)
+        else:
+            return self.conv(x)
 
 
 class BottleneckBlock(nn.Module):
@@ -92,8 +194,19 @@ class BottleneckBlock(nn.Module):
         return self.relu(x+y)
 
 
+def get_res_block_type(res_block_name):
+    if res_block_name == 'original':
+        return ResidualBlock
+    elif res_block_name == 'mobilenet_v1':
+        return MobileV1_Residual
+    elif res_block_name == 'mobilenet_v2':
+        return MobileV2_Residual
+    else:
+        raise RuntimeError('Invalid residual block name')
+
+
 class BasicEncoder(nn.Module):
-    def __init__(self, output_dim=128, norm_fn='batch', dropout=0.0, downsample=3):
+    def __init__(self, output_dim=128, norm_fn='batch', dropout=0.0, downsample=3, res_block_name='original', expanse_ratio=1):
         super(BasicEncoder, self).__init__()
         self.norm_fn = norm_fn
         self.downsample = downsample
@@ -114,9 +227,11 @@ class BasicEncoder(nn.Module):
         self.relu1 = nn.ReLU(inplace=True)
 
         self.in_planes = 64
-        self.layer1 = self._make_layer(64,  stride=1)
-        self.layer2 = self._make_layer(96, stride=1 + (downsample > 1))
-        self.layer3 = self._make_layer(128, stride=1 + (downsample > 0))
+        self.res_block_type = get_res_block_type(res_block_name)
+        self.expanse_ratio = expanse_ratio
+        self.layer1 = self._make_layer(64, 1)
+        self.layer2 = self._make_layer(96, 1 + (downsample > 1))
+        self.layer3 = self._make_layer(128, 1 + (downsample > 0))
 
         # output convolution
         self.conv2 = nn.Conv2d(128, output_dim, kernel_size=1)
@@ -135,8 +250,8 @@ class BasicEncoder(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
     def _make_layer(self, dim, stride=1):
-        layer1 = ResidualBlock(self.in_planes, dim, self.norm_fn, stride=stride)
-        layer2 = ResidualBlock(dim, dim, self.norm_fn, stride=1)
+        layer1 = self.res_block_type(self.in_planes, dim, self.norm_fn, stride=stride, expanse_ratio=self.expanse_ratio)
+        layer2 = self.res_block_type(dim, dim, self.norm_fn, stride=1, expanse_ratio=self.expanse_ratio)
         layers = (layer1, layer2)
         
         self.in_planes = dim
@@ -169,8 +284,9 @@ class BasicEncoder(nn.Module):
 
         return x
 
+
 class MultiBasicEncoder(nn.Module):
-    def __init__(self, output_dim=[128], norm_fn='batch', dropout=0.0, downsample=3):
+    def __init__(self, output_dim=[128], norm_fn='batch', dropout=0.0, downsample=3, res_block_name='original', expanse_ratio=1):
         super(MultiBasicEncoder, self).__init__()
         self.norm_fn = norm_fn
         self.downsample = downsample
@@ -191,16 +307,18 @@ class MultiBasicEncoder(nn.Module):
         self.relu1 = nn.ReLU(inplace=True)
 
         self.in_planes = 64
-        self.layer1 = self._make_layer(64, stride=1)
-        self.layer2 = self._make_layer(96, stride=1 + (downsample > 1))
-        self.layer3 = self._make_layer(128, stride=1 + (downsample > 0))
-        self.layer4 = self._make_layer(128, stride=2)
-        self.layer5 = self._make_layer(128, stride=2)
+        self.res_block_type = get_res_block_type(res_block_name)
+        self.expanse_ratio = expanse_ratio
+        self.layer1 = self._make_layer(64, 1)
+        self.layer2 = self._make_layer(96, 1 + (downsample > 1))
+        self.layer3 = self._make_layer(128, 1 + (downsample > 0))
+        self.layer4 = self._make_layer(128, 2)
+        self.layer5 = self._make_layer(128, 2)
 
         output_list = []
         for dim in output_dim:
             conv_out = nn.Sequential(
-                ResidualBlock(128, 128, self.norm_fn, stride=1),
+                self.res_block_type(128, 128, self.norm_fn, stride=1, expanse_ratio=expanse_ratio),
                 nn.Conv2d(128, dim[2], 3, padding=1))
             output_list.append(conv_out)
 
@@ -209,7 +327,7 @@ class MultiBasicEncoder(nn.Module):
         output_list = []
         for dim in output_dim:
             conv_out = nn.Sequential(
-                ResidualBlock(128, 128, self.norm_fn, stride=1),
+                self.res_block_type(128, 128, self.norm_fn, stride=1, expanse_ratio=expanse_ratio),
                 nn.Conv2d(128, dim[1], 3, padding=1))
             output_list.append(conv_out)
 
@@ -237,8 +355,8 @@ class MultiBasicEncoder(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
     def _make_layer(self, dim, stride=1):
-        layer1 = ResidualBlock(self.in_planes, dim, self.norm_fn, stride=stride)
-        layer2 = ResidualBlock(dim, dim, self.norm_fn, stride=1)
+        layer1 = self.res_block_type(self.in_planes, dim, self.norm_fn, stride=stride, expanse_ratio=self.expanse_ratio)
+        layer2 = self.res_block_type(dim, dim, self.norm_fn, stride=1, expanse_ratio=self.expanse_ratio)
         layers = (layer1, layer2)
 
         self.in_planes = dim

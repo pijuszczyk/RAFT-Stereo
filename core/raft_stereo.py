@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from core.update import BasicMultiUpdateBlock
-from core.extractor import BasicEncoder, MultiBasicEncoder, ResidualBlock
+from core.extractor import BasicEncoder, MultiBasicEncoder, get_res_block_type
 from core.corr import CorrBlock1D, PytorchAlternateCorrBlock1D, CorrBlockFast1D, AlternateCorrBlock
 from core.utils.utils import coords_grid, upflow8
 
@@ -19,6 +19,7 @@ except:
         def __exit__(self, *args):
             pass
 
+
 class RAFTStereo(nn.Module):
     def __init__(self, args):
         super().__init__()
@@ -26,21 +27,23 @@ class RAFTStereo(nn.Module):
         
         context_dims = args.hidden_dims
 
-        self.cnet = MultiBasicEncoder(output_dim=[args.hidden_dims, context_dims], norm_fn="batch", downsample=args.n_downsample)
+        self.cnet = MultiBasicEncoder(output_dim=[args.hidden_dims, context_dims], norm_fn="batch",
+                                      downsample=args.n_downsample, res_block_name=args.cnet_res_block_name, expanse_ratio=args.cnet_mobile_res_expanse_ratio)
         self.update_block = BasicMultiUpdateBlock(self.args, hidden_dims=args.hidden_dims)
 
         self.context_zqr_convs = nn.ModuleList([nn.Conv2d(context_dims[i], args.hidden_dims[i]*3, 3, padding=3//2) for i in range(self.args.n_gru_layers)])
 
         if args.shared_backbone:
             self.conv2 = nn.Sequential(
-                ResidualBlock(128, 128, 'instance', stride=1),
+                get_res_block_type(args.fnet_res_block_name)(128, 128, 'instance', stride=1, expanse_ratio=args.fnet_mobile_res_expanse_ratio),
                 nn.Conv2d(128, 256, 3, padding=1))
         else:
-            self.fnet = BasicEncoder(output_dim=256, norm_fn='instance', downsample=args.n_downsample)
+            self.fnet = BasicEncoder(output_dim=256, norm_fn='instance', downsample=args.n_downsample,
+                                     res_block_name=args.fnet_res_block_name, expanse_ratio=args.fnet_mobile_res_expanse_ratio)
 
     def freeze_bn(self):
         for m in self.modules():
-            if isinstance(m, nn.BatchNorm2d):
+            if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.GroupNorm) or isinstance(m, nn.InstanceNorm2d):
                 m.eval()
 
     def initialize_flow(self, img):

@@ -205,6 +205,11 @@ if __name__ == '__main__':
     parser.add_argument('--n_downsample', type=int, default=2, help="resolution of the disparity field (1/2^K)")
     parser.add_argument('--slow_fast_gru', action='store_true', help="iterate the low-res GRUs more frequently")
     parser.add_argument('--n_gru_layers', type=int, default=3, help="number of hidden GRU levels")
+    parser.add_argument('--cnet_res_block_name', choices=['original', 'mobilenet_v1', 'mobilenet_v2'], default='original', help='type of residual block used in the context network')
+    parser.add_argument('--fnet_res_block_name', choices=['original', 'mobilenet_v1', 'mobilenet_v2'], default='original', help='type of residual block used in the feature network')
+    parser.add_argument('--cnet_mobile_res_expanse_ratio', type=int, default=2, help='expanse ratio of mobilenet v2 residual blocks (if used) in context network')
+    parser.add_argument('--fnet_mobile_res_expanse_ratio', type=int, default=3, help='expanse ratio of mobilenet v2 residual blocks (if used) in feature network')
+
     args = parser.parse_args()
 
     model = torch.nn.DataParallel(RAFTStereo(args), device_ids=[0])
